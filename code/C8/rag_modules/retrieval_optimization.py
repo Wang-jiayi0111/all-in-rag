@@ -22,28 +22,25 @@ class RetrievalOptimizationModule:
             vectorstore: FAISS向量存储
             chunks: 文档块列表
         """
-        self.vectorstore = vectorstore
-        self.chunks = chunks
-        self.setup_retrievers()
+        self.vectorstore = vectorstore      # 语义向量检索能力
+        self.chunks = chunks                # 用于关键词检索
+        self.setup_retrievers()         # 设置检索器
 
     def setup_retrievers(self):
         """设置向量检索器和BM25检索器"""
         logger.info("正在设置检索器...")
 
-        # 向量检索器
+        # 向量检索器（基于语义向量）--自然语言模糊查询
         self.vector_retriever = self.vectorstore.as_retriever(
             search_type="similarity",
             search_kwargs={"k": 5}
         )
 
-        # BM25检索器
+        # BM25检索器（基于关键词词频）--无法理解语义
         self.bm25_retriever = BM25Retriever.from_documents(
             self.chunks,
             k=5
         )
-
-
-
         logger.info("检索器设置完成")
     
     def hybrid_search(self, query: str, top_k: int = 3) -> List[Document]:

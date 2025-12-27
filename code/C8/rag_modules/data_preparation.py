@@ -16,7 +16,6 @@ logger = logging.getLogger(__name__)
 
 class DataPreparationModule:
     """数据准备模块 - 负责数据加载、清洗和预处理"""
-    # 统一维护的分类与难度配置，供外部复用，避免关键词重复定义
     CATEGORY_MAPPING = {
         'meat_dish': '荤菜',
         'vegetable_dish': '素菜',
@@ -56,6 +55,7 @@ class DataPreparationModule:
         documents = []
         data_path_obj = Path(self.data_path)
 
+        # data_path_obj.rglob("*.md") 递归遍历 self.data_path 目录及其子目录下的所有Markdown文件
         for md_file in data_path_obj.rglob("*.md"):
             try:
                 # 直接读取文件内容，保持Markdown格式
@@ -64,10 +64,12 @@ class DataPreparationModule:
 
                 # 为每个父文档分配确定性的唯一ID（基于数据根目录的相对路径）
                 try:
-                    data_root = Path(self.data_path).resolve()
-                    relative_path = Path(md_file).resolve().relative_to(data_root).as_posix()
+                    data_root = Path(self.data_path).resolve()      # 获取文档根目录的绝对路径
+                    # 当前.md文件相对于根目录的相对路径
+                    relative_path = Path(md_file).resolve().relative_to(data_root).as_posix() 
                 except Exception:
                     relative_path = Path(md_file).as_posix()
+                # 对相对路径进行MD5哈希，作为父文档的唯一ID
                 parent_id = hashlib.md5(relative_path.encode("utf-8")).hexdigest()
 
                 # 创建Document对象
@@ -84,7 +86,7 @@ class DataPreparationModule:
             except Exception as e:
                 logger.warning(f"读取文件 {md_file} 失败: {e}")
         
-        # 增强文档元数据
+        # 增强文档元数据（3种标签：菜品分类、菜品名称、难度等级）
         for doc in documents:
             self._enhance_metadata(doc)
         
@@ -189,7 +191,7 @@ class DataPreparationModule:
         for doc in self.documents:
             try:
                 # 检查文档内容是否包含Markdown标题
-                content_preview = doc.page_content[:200]
+                content_preview = doc.page_content[:200]    # 预览前200字符
                 has_headers = any(line.strip().startswith('#') for line in content_preview.split('\n'))
 
                 if not has_headers:
@@ -212,8 +214,7 @@ class DataPreparationModule:
                     # 为子块分配唯一ID
                     child_id = str(uuid.uuid4())
 
-                    # 合并原文档元数据和新的标题元数据
-                    chunk.metadata.update(doc.metadata)
+                    chunk.metadata.update(doc.metadata)     # 父文档的元数据继承到子文档中
                     chunk.metadata.update({
                         "chunk_id": child_id,
                         "parent_id": parent_id,
@@ -221,7 +222,7 @@ class DataPreparationModule:
                         "chunk_index": i      # 在父文档中的位置
                     })
 
-                    # 建立父子映射关系
+                    # 建立父子映射关系（根据子文档id找到父文档id）
                     self.parent_child_map[child_id] = parent_id
 
                 all_chunks.extend(md_chunks)
@@ -323,10 +324,10 @@ class DataPreparationModule:
             对应的父文档列表（去重，按相关性排序）
         """
         # 统计每个父文档被匹配的次数（相关性指标）
-        parent_relevance = {}
-        parent_docs_map = {}
+        parent_relevance = {}       # key = 父文档 ID，value = 匹配的子文档数量
+        parent_docs_map = {}        # key = 父文档 ID，value = 父文档
 
-        # 收集所有相关的父文档ID和相关性分数
+        # 遍历子块，收集所有相关的父文档ID和相关性分数
         for chunk in child_chunks:
             parent_id = chunk.metadata.get("parent_id")
             if parent_id:
@@ -335,6 +336,7 @@ class DataPreparationModule:
 
                 # 缓存父文档（避免重复查找）
                 if parent_id not in parent_docs_map:
+                    # 遍历所有原始父文档，找到parent_id对应的文档存入缓存字典
                     for doc in self.documents:
                         if doc.metadata.get("parent_id") == parent_id:
                             parent_docs_map[parent_id] = doc

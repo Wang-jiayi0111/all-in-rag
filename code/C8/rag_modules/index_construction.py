@@ -56,7 +56,7 @@ class IndexConstructionModule:
         if not chunks:
             raise ValueError("文档块列表不能为空")
         
-        # 构建FAISS向量存储
+        # 构建FAISS向量存储及索引构建
         self.vectorstore = FAISS.from_documents(
             documents=chunks,
             embedding=self.embeddings
