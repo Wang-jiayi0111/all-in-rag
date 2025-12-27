@@ -93,9 +93,11 @@ usage_metadata={
 - **`id`**: 本次运行的唯一标识符。
 - **`usage_metadata`**: 与 `response_metadata` 中的 `token_usage` 类似，提供了输入和输出token的统计。
 
-## 三、基于LangChain框架的RAG实现
+## 三、基于 LangChain 框架的 RAG 实现
 
-> 在第一节中，我们提到四步构建最小可行系统分别是数据准备、索引构建、检索优化和生成集成。接下来将围绕这四个方面来实现一个基于LangChain框架的RAG应用。
+在第一节中，我们提到四步构建最小可行系统分别是数据准备、索引构建、检索优化和生成集成。下面将围绕这四个方面来实现一个基于 LangChain 框架的 RAG 应用。
+
+> [本节完整代码](https://github.com/datawhalechina/all-in-rag/blob/main/code/C1/01_langchain_example.py)
 
 ### 3.1 初始化设置
 
@@ -116,7 +118,7 @@ from langchain_deepseek import ChatDeepSeek
 load_dotenv()
 ```
 
-### 3.2 数据准备 (Data Preparation)
+### 3.2 数据准备
 
 - **加载原始文档**: 先定义Markdown文件的路径，然后使用`TextLoader`加载该文件作为知识源。
     ```python
@@ -133,7 +135,7 @@ load_dotenv()
     texts = text_splitter.split_documents(docs)
     ```
 
-### 3.3 索引构建 (Index Construction)
+### 3.3 索引构建
 
 数据准备完成后，接下来构建向量索引：
 
@@ -152,7 +154,7 @@ load_dotenv()
     ```
     这个过程完成后，便构建了一个可供查询的知识索引。
 
-### 3.4 查询与检索 (Query and Retrieval)
+### 3.4 查询与检索
 
 索引构建完毕后，便可以针对用户问题进行查询与检索：
 
@@ -170,7 +172,7 @@ load_dotenv()
     ```
     > 使用 `"\n\n"` (双换行符) 而不是 `"\n"` (单换行符) 来连接不同的检索文档块，主要是为了在传递给大型语言模型（LLM）时，能够更清晰地在语义上区分这些独立的文本片段。双换行符通常代表段落的结束和新段落的开始，这种格式有助于LLM将每个块视为一个独立的上下文来源，从而更好地理解和利用这些信息来生成回答。
 
-### 3.5 生成集成 (Generation Integration)
+### 3.5 生成集成
 
 最后一步是将检索到的上下文与用户问题结合，利用大语言模型（LLM）生成答案：
 
@@ -202,15 +204,14 @@ load_dotenv()
     answer = llm.invoke(prompt.format(question=question, context=docs_content))
     print(answer)
     ```
-[完整代码](https://github.com/datawhalechina/all-in-rag/blob/main/code/C1/01_langchain_example.py)
 
-> 老湿老湿，Langchain很强大但还是太吃操作了，有没有更加简单又好用的框架推荐呢？
+> 老湿老湿，Langchain 很强大但还是太吃操作了，有没有更加简单又好用的框架推荐呢？
 
 > 有的兄弟，有的！像这样好用的框架还有LlamaIndex😉
 
 ## 四、低代码（基于LlamaIndex）
 
-在RAG方面，LlamaIndex提供了更多封装好的API接口，这无疑降低了上手门槛，下面是一个简单实现：
+在 RAG 方面，LlamaIndex 提供了更多封装好的 API 接口，这无疑降低了上手门槛，下面是一个简单实现：
 
 ```python
 import os
