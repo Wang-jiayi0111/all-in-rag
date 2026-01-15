@@ -13,6 +13,9 @@ from langchain_core.documents import Document
 from langchain_community.retrievers import BM25Retriever
 from neo4j import GraphDatabase
 from .graph_indexing import GraphIndexingModule
+from .cross_encoder_reranker import CrossEncoderReranker
+from .reranking_fusion import FusionReranker, FusionRerankerConfig
+
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +51,42 @@ class HybridRetrievalModule:
         # 图索引模块
         self.graph_indexing = GraphIndexingModule(config, llm_client)
         self.graph_indexed = False
+
+        self.reranker = None
+        self.enable_reranking = getattr(config, "enable_cross_encoder", True)
+
+        if self.enable_reranking:
+            try:
+                self.reranker = CrossEncoderReranker(
+                    model_name=getattr(config, 'cross_encoder_model', 
+                                     self.config.cross_encoder_model),
+                )
+                logger.info("✅ Cross-Encoder 重排器已初始化")
+            except Exception as e:
+                logger.warning(f"Cross-Encoder 初始化失败，将禁用重排: {e}")
+                self.enable_reranking = False
         
+        # 【新增】初始化融合重排器
+        self.enable_fusion_reranking = getattr(config, 'enable_fusion_reranking', True)
+        
+        if self.enable_fusion_reranking:
+            try:
+                fusion_config = FusionRerankerConfig(
+                    semantic_weight=getattr(config, 'fusion_semantic_weight', 0.6),
+                    graph_weight=getattr(config, 'fusion_graph_weight', 0.4),
+                    enable_adaptive_weight=getattr(config, 'enable_adaptive_weight', True),
+                    enable_mmr=getattr(config, 'enable_mmr', False),
+                    mmr_lambda=getattr(config, 'mmr_lambda', 0.7),
+                    normalize_scores=True
+                )
+                self.fusion_reranker = FusionReranker(fusion_config)
+                logger.info("✅ 融合重排器已初始化")
+            except Exception as e:
+                logger.warning(f"融合重排器初始化失败: {e}")
+                self.enable_fusion_reranking = False
+        else:
+            self.fusion_reranker = None
+
     def initialize(self, chunks: List[Document]):
         """初始化检索系统"""
         logger.info("初始化混合检索模块...")
@@ -123,6 +161,7 @@ class HybridRetrievalModule:
             
         return relationships
             
+    # 提取查询的实体和主题关键词
     def extract_query_keywords(self, query: str) -> Tuple[List[str], List[str]]:
         """
         提取查询关键词：实体级 + 主题级
@@ -440,8 +479,8 @@ class HybridRetrievalModule:
         entity_keywords, topic_keywords = self.extract_query_keywords(query)
         
         # 2. 执行双层检索
-        entity_results = self.entity_level_retrieval(entity_keywords, top_k)
-        topic_results = self.topic_level_retrieval(topic_keywords, top_k)
+        entity_results = self.entity_level_retrieval(entity_keywords, top_k)    # 回答那些具体的、指代明确的问题(某菜品)
+        topic_results = self.topic_level_retrieval(topic_keywords, top_k)       # 回答那些模糊的、概念性的、非具体指代的问题
         
         # 3. 结果合并和排序
         all_results = entity_results + topic_results
@@ -478,12 +517,13 @@ class HybridRetrievalModule:
         logger.info(f"双层检索完成，返回 {len(documents)} 个文档")
         return documents
     
+    # 查询->milvus向量检索->得到检索id->获取检索邻居->将邻居信息注入检索内容->构建索引的document对象->返回document对象
     def vector_search_enhanced(self, query: str, top_k: int = 5) -> List[Document]:
         """
         增强的向量检索：结合图信息
         """
         try:
-            # 使用Milvus进行向量检索
+            # 使用Milvus进行向量检索（得到纯文本）
             vector_docs = self.milvus_module.similarity_search(query, k=top_k*2)
             
             # 用图信息增强结果并转换为Document对象
@@ -498,7 +538,7 @@ class HybridRetrievalModule:
                     # 从图中获取邻居信息
                     neighbors = self._get_node_neighbors(node_id)
                     if neighbors:
-                        # 将邻居信息添加到内容中
+                        # 将邻居信息添加到内容中（邻居信息注入——增强）
                         neighbor_info = f"\n相关信息: {', '.join(neighbors[:3])}"
                         content += neighbor_info
                 
@@ -542,7 +582,9 @@ class HybridRetrievalModule:
             logger.error(f"获取邻居节点失败: {e}")
             return []
     
-    def hybrid_search(self, query: str, top_k: int = 5) -> List[Document]:
+    def hybrid_search(self, query: str, top_k: int = 5,
+        use_fusion_reranking: bool = True,
+        query_complexity: float = 0.5) -> List[Document]:
         """
         混合检索：使用Round-robin轮询合并策略
         公平轮询合并不同检索结果，不使用权重配置
@@ -550,17 +592,18 @@ class HybridRetrievalModule:
         logger.info(f"开始混合检索: {query}")
         
         # 1. 双层检索（实体+主题检索）
-        dual_docs = self.dual_level_retrieval(query, top_k)
+        dual_docs = self.dual_level_retrieval(query, top_k*2)
         
         # 2. 增强向量检索
-        vector_docs = self.vector_search_enhanced(query, top_k)
+        vector_docs = self.vector_search_enhanced(query, top_k*2)
         
         # 3. Round-robin轮询合并
         merged_docs = []
         seen_doc_ids = set()
-        max_len = max(len(dual_docs), len(vector_docs))
+        max_len = max(len(dual_docs), len(vector_docs))     # 轮询次数：两种索引中较长的结果数
         origin_len = len(dual_docs) + len(vector_docs)
         
+        # 交替从两个列表中提取结果到终极列表merged_docs
         for i in range(max_len):
             # 先添加双层检索结果
             if i < len(dual_docs):
@@ -589,12 +632,54 @@ class HybridRetrievalModule:
                     doc.metadata["final_score"] = similarity_score
                     merged_docs.append(doc)
         
-        # 取前top_k个结果
-        final_docs = merged_docs[:top_k]
+        # 【改进】4. 使用融合重排替代单一重排
+        if use_fusion_reranking and self.enable_fusion_reranking and merged_docs:
+            logger.info("应用多维度融合重排...")
+            try:
+                merged_docs = self.fusion_reranker.fuse_and_rerank(
+                    query=query,
+                    documents=merged_docs,
+                    top_k=top_k,
+                    query_complexity=query_complexity
+                )
+            except Exception as e:
+                logger.error(f"融合重排失败，降级到原始排序: {e}")
+                merged_docs = merged_docs[:top_k]
+        elif self.enable_reranking and merged_docs:
+            # 降级：只使用 Cross-Encoder（如果融合重排禁用）
+            logger.info("应用 Cross-Encoder 重排...")
+            try:
+                merged_docs = self.reranker.rerank(query, merged_docs, top_k)
+            except Exception as e:
+                logger.error(f"Cross-Encoder 重排失败: {e}")
+                merged_docs = merged_docs[:top_k]
+        else:
+            merged_docs = merged_docs[:top_k]
         
-        logger.info(f"Round-robin合并：从总共{origin_len}个结果合并为{len(final_docs)}个文档")
-        logger.info(f"混合检索完成，返回 {len(final_docs)} 个文档")
-        return final_docs
+        logger.info(f"混合检索完成，返回 {len(merged_docs)} 个文档")
+        return merged_docs
+
+        # 4. Cross-Encoder 重排
+        # if self.enable_reranking and merged_docs:
+        #     logger.info("应用 Cross-Encoder 重排...")
+        #     merged_docs = self.reranker.rerank(
+        #         query=query,
+        #         documents=merged_docs,
+        #         top_k=top_k
+        #     )
+        # else:
+        #     # 如果禁用了重排，直接取前 top_k
+        #     merged_docs = merged_docs[:top_k]
+
+        # logger.info(f"混合检索完成，返回 {len(merged_docs)} 个文档")
+        # return merged_docs
+        
+        # # 取前top_k个结果
+        # final_docs = merged_docs[:top_k]
+        
+        # logger.info(f"Round-robin合并：从总共{origin_len}个结果合并为{len(final_docs)}个文档")
+        # logger.info(f"混合检索完成，返回 {len(final_docs)} 个文档")
+        # return final_docs
         
     def close(self):
         """关闭资源连接"""

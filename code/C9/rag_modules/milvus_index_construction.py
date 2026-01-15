@@ -60,6 +60,7 @@ class MilvusIndexConstructionModule:
             return ""
         return str(text)[:max_length]
     
+    # milvus客户端初始化
     def _setup_client(self):
         """初始化Milvus客户端"""
         try:
@@ -76,6 +77,7 @@ class MilvusIndexConstructionModule:
             logger.error(f"连接Milvus失败: {e}")
             raise
     
+    # 嵌入模型初始化
     def _setup_embeddings(self):
         """初始化嵌入模型"""
         logger.info(f"正在初始化嵌入模型: {self.model_name}")
@@ -88,6 +90,7 @@ class MilvusIndexConstructionModule:
         
         logger.info("嵌入模型初始化完成")
     
+    # 创建集合存储模式Schema(数据结构)
     def _create_collection_schema(self) -> CollectionSchema:
         """
         创建集合模式
@@ -119,6 +122,7 @@ class MilvusIndexConstructionModule:
         
         return schema
     
+    # 创建集合
     def create_collection(self, force_recreate: bool = False) -> bool:
         """
         创建Milvus集合
@@ -159,6 +163,7 @@ class MilvusIndexConstructionModule:
             logger.error(f"创建集合失败: {e}")
             return False
     
+    # 创建索引
     def create_index(self) -> bool:
         """
         创建向量索引
@@ -196,6 +201,7 @@ class MilvusIndexConstructionModule:
             logger.error(f"创建索引失败: {e}")
             return False
     
+    # 向集合中插入数据
     def build_vector_index(self, chunks: List[Document]) -> bool:
         """
         构建向量索引
@@ -216,7 +222,7 @@ class MilvusIndexConstructionModule:
             if not self.create_collection(force_recreate=True):
                 return False
             
-            # 2. 准备数据
+            # 2. 准备数据（批量生成向量）
             logger.info("正在生成向量embeddings...")
             texts = [chunk.page_content for chunk in chunks]
             vectors = self.embeddings.embed_documents(texts)

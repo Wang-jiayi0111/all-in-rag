@@ -28,7 +28,7 @@ class GraphRelation:
     relation_type: str
     properties: Dict[str, Any]
 
-class GraphDataPreparationModule:
+class   GraphDataPreparationModule:
     """图数据库数据准备模块 - 从Neo4j读取数据并转换为文档"""
     
     def __init__(self, uri: str, user: str, password: str, database: str = "neo4j"):
@@ -83,10 +83,10 @@ class GraphDataPreparationModule:
     
     def load_graph_data(self) -> Dict[str, Any]:
         """
-        从Neo4j加载图数据
+        从Neo4j加载图数据（抽取——使用 Cypher 语句抽取菜谱、食材、步骤的数据）
         
         Returns:
-            包含节点和关系的数据字典
+            包含节点（食材）和关系（步骤）的数据字典
         """
         logger.info("正在从Neo4j加载图数据...")
         
@@ -178,7 +178,7 @@ class GraphDataPreparationModule:
     
     def build_recipe_documents(self) -> List[Document]:
         """
-        构建菜谱文档，集成相关的食材和步骤信息
+        构建菜谱文档，集成相关的食材和步骤信息（转换——将load_graph_data提取的信息构建成Document类型）
         
         Returns:
             结构化的菜谱文档列表
@@ -408,8 +408,6 @@ class GraphDataPreparationModule:
         logger.info(f"文档分块完成，共生成 {len(chunks)} 个块")
         return chunks
     
-
-    
     def get_statistics(self) -> Dict[str, Any]:
         """
         获取数据统计信息
@@ -451,7 +449,16 @@ class GraphDataPreparationModule:
         
         return stats
     
-
+    def print_graph_stats(self):
+        with self.driver.session() as session:
+            # 查询节点
+            node_count = session.run("MATCH (n) RETURN count(n) AS count").single()["count"]
+            # 查询边
+            rel_count = session.run("MATCH ()-[r]->() RETURN count(r) AS count").single()["count"]
+            
+            print(f"✅ 图谱统计完毕：")
+            print(f"📊 总节点数 (Nodes): {node_count}")
+            print(f"🔗 总边数 (Edges): {rel_count}")
     
     def __del__(self):
         """析构函数，确保关闭连接"""

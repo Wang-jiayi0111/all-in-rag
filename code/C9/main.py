@@ -46,12 +46,12 @@ class AdvancedGraphRAGSystem:
         self.config = config or DEFAULT_CONFIG
         
         # 核心模块
-        self.data_module = None
-        self.index_module = None
-        self.generation_module = None
+        self.data_module = None     # 数据准备模块
+        self.index_module = None    # 向量索引模块
+        self.generation_module = None   # 生成模块
         
         # 检索引擎
-        self.traditional_retrieval = None
+        self.traditional_retrieval = None       # 
         self.graph_rag_retrieval = None
         self.query_router = None
         
@@ -82,7 +82,7 @@ class AdvancedGraphRAGSystem:
                 model_name=self.config.embedding_model
             )
             
-            # 3. 生成模块
+            # 3. 生成模块（连接LLM）
             print("初始化生成模块...")
             self.generation_module = GenerationIntegrationModule(
                 model_name=self.config.llm_model,
@@ -106,7 +106,7 @@ class AdvancedGraphRAGSystem:
                 llm_client=self.generation_module.client
             )
             
-            # 6. 智能查询路由器
+            # 6. 智能查询路由器（判断使用哪个引擎）
             print("初始化智能查询路由器...")
             self.query_router = IntelligentQueryRouter(
                 traditional_retrieval=self.traditional_retrieval,
@@ -122,7 +122,7 @@ class AdvancedGraphRAGSystem:
             raise
     
     def build_knowledge_base(self):
-        """构建知识库（如果需要）"""
+        """构建知识库"""
         print("\n检查知识库状态...")
         
         try:
@@ -137,6 +137,7 @@ class AdvancedGraphRAGSystem:
                     self.data_module.load_graph_data()
                     print("构建菜谱文档...")
                     self.data_module.build_recipe_documents()
+                    self.data_module.print_graph_stats()
                     print("进行文档分块...")
                     chunks = self.data_module.chunk_documents(
                         chunk_size=self.config.chunk_size,
@@ -157,6 +158,7 @@ class AdvancedGraphRAGSystem:
             # 构建菜谱文档
             print("构建菜谱文档...")
             self.data_module.build_recipe_documents()
+            self.data_module.print_graph_stats()
             
             # 进行文档分块
             print("进行文档分块...")
@@ -181,7 +183,7 @@ class AdvancedGraphRAGSystem:
         except Exception as e:
             logger.error(f"知识库构建失败: {e}")
             raise
-    
+
     def _initialize_retrievers(self, chunks: List = None):
         """初始化检索器"""
         print("初始化检索引擎...")
@@ -227,6 +229,8 @@ class AdvancedGraphRAGSystem:
         """
         智能问答：自动选择最佳检索策略
         """
+        show_reranking: bool = True
+        show_fusion_scores: bool = True
         if not self.system_ready:
             raise ValueError("系统未就绪，请先构建知识库")
             
@@ -244,6 +248,32 @@ class AdvancedGraphRAGSystem:
             print("执行智能查询路由...")
             relevant_docs, analysis = self.query_router.route_query(question, self.config.top_k)
             
+            # 显示重排结果
+            # if show_reranking and relevant_docs:
+            #     print("\n📊 Cross-Encoder 重排结果:")
+            #     for i, doc in enumerate(relevant_docs[:3], 1):
+            #         ce_score = doc.metadata.get('cross_encoder_score', 'N/A')
+            #         recipe_name = doc.metadata.get('recipe_name', '未知')
+                    
+            #         if isinstance(ce_score, float):
+            #             print(f"  {i}. {recipe_name} (重排分数: {ce_score:.4f})")
+            #         else:
+            #             print(f"  {i}. {recipe_name}")
+
+            if show_fusion_scores and relevant_docs:
+                print("\n📊 多维度融合重排结果:")
+                print(f"{'排序':<5} {'菜名':<20} {'语义相关':<12} {'图权重':<12} {'融合分数':<12}")
+                print("=" * 65)
+                
+                for i, doc in enumerate(relevant_docs[:5], 1):
+                    semantic = doc.metadata.get('cross_encoder_score', 0.0)
+                    graph = doc.metadata.get('graph_relevance_score', 0.0)
+                    fusion = doc.metadata.get('fusion_score', 0.0)
+                    recipe_name = doc.metadata.get('recipe_name', '未知')
+                    
+                    print(f"{i:<5} {recipe_name:<20} {semantic:>10.4f}  {graph:>10.4f}  {fusion:>10.4f}")
+ 
+
             # 2. 显示路由信息
             strategy_icons = {
                 "hybrid_traditional": "🔍",
@@ -298,9 +328,6 @@ class AdvancedGraphRAGSystem:
             return f"抱歉，处理问题时出现错误：{str(e)}", None
     
 
-    
-
-    
     def run_interactive(self):
         """运行交互式问答"""
         if not self.system_ready:
@@ -332,7 +359,7 @@ class AdvancedGraphRAGSystem:
                 
                 # 普通问答 - 使用默认设置
                 use_stream = True  # 默认使用流式输出
-                explain_routing = False  # 默认不显示路由决策
+                explain_routing = True  # 默认不显示路由决策
 
                 print("\n回答:")
                 

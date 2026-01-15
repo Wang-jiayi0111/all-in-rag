@@ -25,6 +25,19 @@ class GraphRAGConfig:
     embedding_model: str = "BAAI/bge-small-zh-v1.5"
     llm_model: str = "deepseek-chat"
 
+    # 重排设置
+    enable_cross_encoder: bool = True
+    cross_encoder_model: str = "BAAI/bge-reranker-base"
+    reranking_batch_size: int = 32
+
+    # 融合重排配置
+    enable_fusion_reranking: bool = True          # 启用融合重排
+    fusion_semantic_weight: float = 0.6           # Cross-Encoder 权重
+    fusion_graph_weight: float = 0.4              # 图路径权重
+    enable_adaptive_weight: bool = True           # 根据查询复杂度动态调整
+    enable_mmr: bool = False                      # 是否使用 MMR 消除重复
+    mmr_lambda: float = 0.7 
+
     # 检索配置（LightRAG Round-robin策略）
     top_k: int = 5
 

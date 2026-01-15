@@ -61,6 +61,7 @@ class IntelligentQueryRouter:
             "total_queries": 0
         }
         
+    # 使用LLM分析查询特征
     def analyze_query(self, query: str) -> QueryAnalysis:
         """
         深度分析查询特征，决定最佳检索策略
@@ -95,11 +96,11 @@ class IntelligentQueryRouter:
            - 实体类型是什么？
         
         基于分析推荐检索策略：
-        - hybrid_traditional: 适合简单直接的信息查找
-        - graph_rag: 适合复杂关系推理和知识发现
+        - hybrid_traditional: 简单信息查找
+        - graph_rag: 复杂关系推理
         - combined: 需要两种策略结合
         
-        返回JSON格式：
+        【重要】直接返回如下JSON格式，不要任何其他文本：
         {{
             "query_complexity": 0.6,
             "relationship_intensity": 0.8,
@@ -118,9 +119,18 @@ class IntelligentQueryRouter:
                 temperature=0.1,
                 max_tokens=800
             )
+            response_text = response.choices[0].message.content
+        
+            logger.info(f"LLM 响应长度: {len(response_text)} 字符")
             
-            result = json.loads(response.choices[0].message.content.strip())
+            result = self._extract_json(response_text)
+
+            if not result:
+                logger.error(f"❌ JSON 提取失败，使用降级方案")
+                logger.debug(f"响应内容: {response_text}")
+                return self._rule_based_analysis(query)
             
+        
             analysis = QueryAnalysis(
                 query_complexity=result.get("query_complexity", 0.5),
                 relationship_intensity=result.get("relationship_intensity", 0.5),
@@ -138,7 +148,89 @@ class IntelligentQueryRouter:
             logger.error(f"查询分析失败: {e}")
             # 降级方案：基于规则的简单分析
             return self._rule_based_analysis(query)
+
     
+    def _extract_json(self, text: str) -> Optional[dict]:
+        """
+        【新增】从文本中智能提取 JSON
+        
+        支持以下格式：
+        1. 纯 JSON
+        2. ```json...``` 代码块
+        3. ```...``` 代码块
+        4. 混合文本中的 JSON
+        """
+        if not text or not isinstance(text, str):
+            logger.warning(f"提取JSON: 无效输入 (类型: {type(text)})")
+            return None
+        
+        text = text.strip()
+        
+        # 方案 1: 直接解析（最快）
+        try:
+            logger.debug("尝试方案1: 直接JSON解析")
+            return json.loads(text)
+        except json.JSONDecodeError as e:
+            logger.debug(f"方案1失败: {e}")
+        
+        # 方案 2: 从 Markdown 代码块提取
+        import re
+        logger.debug("尝试方案2: Markdown 代码块提取")
+        patterns = [
+            r'```json\s*([\s\S]*?)```',  # ```json ... ```
+            r'```\s*([\s\S]*?)```',       # ``` ... ```
+        ]
+        
+        for pattern in patterns:
+            matches = re.findall(pattern, text)
+            for match in matches:
+                try:
+                    logger.debug(f"从代码块提取: {match[:100]}")
+                    return json.loads(match.strip())
+                except json.JSONDecodeError as e:
+                    logger.debug(f"代码块解析失败: {e}")
+                    continue
+        
+        # 方案 3: 查找第一个 { 和最后一个 }
+        logger.debug("尝试方案3: 字符串定位提取")
+        try:
+            start_idx = text.find('{')
+            end_idx = text.rfind('}')
+            
+            if start_idx != -1 and end_idx != -1 and start_idx < end_idx:
+                json_str = text[start_idx:end_idx+1]
+                logger.debug(f"从位置 [{start_idx}:{end_idx+1}] 提取 JSON")
+                logger.debug(f"提取内容: {json_str[:100]}")
+                return json.loads(json_str)
+        except json.JSONDecodeError as e:
+            logger.debug(f"方案3失败: {e}")
+        
+        # 方案 4: 尝试修复常见 JSON 错误
+        logger.debug("尝试方案4: JSON 修复")
+        try:
+            # 移除尾部逗号
+            cleaned = re.sub(r',\s*}', '}', text)
+            cleaned = re.sub(r',\s*]', ']', cleaned)
+            
+            # 提取 JSON 部分
+            start_idx = cleaned.find('{')
+            end_idx = cleaned.rfind('}')
+            if start_idx != -1 and end_idx != -1:
+                json_str = cleaned[start_idx:end_idx+1]
+                logger.debug(f"修复后提取: {json_str[:100]}")
+                return json.loads(json_str)
+        except json.JSONDecodeError as e:
+            logger.debug(f"方案4失败: {e}")
+        
+        # 所有方案都失败
+        logger.error(f"❌ 所有 JSON 提取方案均失败")
+        logger.error(f"原始文本长度: {len(text)}")
+        logger.error(f"原始文本前200字: {text[:200]}")
+        
+        return None       
+    
+    
+    # 降级分析查询特征（智能分析失败时使用）
     def _rule_based_analysis(self, query: str) -> QueryAnalysis:
         """基于规则的降级分析"""
         # 简单的规则判断
@@ -163,9 +255,52 @@ class IntelligentQueryRouter:
             reasoning="基于规则的简单分析"
         )
     
+    # 根据分析结果 路由到检索引擎
+    # def route_query(self, query: str, top_k: int = 5) -> Tuple[List[Document], QueryAnalysis]:
+    #     """
+    #     智能路由查询到最适合的检索引擎
+    #     """
+    #     logger.info(f"开始智能路由: {query}")
+        
+    #     # 1. 分析查询特征
+    #     analysis = self.analyze_query(query)
+        
+    #     # 2. 更新统计
+    #     self._update_route_stats(analysis.recommended_strategy)
+        
+    #     # 3. 根据策略执行检索
+    #     documents = []
+        
+    #     try:
+    #         if analysis.recommended_strategy == SearchStrategy.HYBRID_TRADITIONAL:
+    #             logger.info("使用传统混合检索")
+    #             documents = self.traditional_retrieval.hybrid_search(query, top_k)
+                
+    #         elif analysis.recommended_strategy == SearchStrategy.GRAPH_RAG:
+    #             logger.info("🕸️ 使用图RAG检索")
+    #             documents = self.graph_rag_retrieval.graph_rag_search(query, top_k)
+                
+    #         elif analysis.recommended_strategy == SearchStrategy.COMBINED:
+    #             logger.info("🔄 使用组合检索策略")
+    #             documents = self._combined_search(query, top_k)
+            
+    #         # 4. 结果后处理
+    #         documents = self._post_process_results(documents, analysis)
+            
+    #         logger.info(f"路由完成，返回 {len(documents)} 个结果")
+    #         return documents, analysis
+            
+    #     except Exception as e:
+    #         logger.error(f"查询路由失败: {e}")
+    #         # 降级到传统检索
+    #         documents = self.traditional_retrieval.hybrid_search(query, top_k)
+    #         return documents, analysis
+    
+        
     def route_query(self, query: str, top_k: int = 5) -> Tuple[List[Document], QueryAnalysis]:
         """
         智能路由查询到最适合的检索引擎
+        【包含 Cross-Encoder 重排】
         """
         logger.info(f"开始智能路由: {query}")
         
@@ -181,15 +316,25 @@ class IntelligentQueryRouter:
         try:
             if analysis.recommended_strategy == SearchStrategy.HYBRID_TRADITIONAL:
                 logger.info("使用传统混合检索")
+                # 混合检索已内置重排逻辑
                 documents = self.traditional_retrieval.hybrid_search(query, top_k)
                 
             elif analysis.recommended_strategy == SearchStrategy.GRAPH_RAG:
                 logger.info("🕸️ 使用图RAG检索")
-                documents = self.graph_rag_retrieval.graph_rag_search(query, top_k)
+                documents = self.graph_rag_retrieval.graph_rag_search(query, top_k * 2)
+                
+                # 【新增】对图RAG结果进行 Cross-Encoder 重排
+                if self.traditional_retrieval.enable_reranking:
+                    logger.info("应用 Cross-Encoder 重排 (图RAG结果)...")
+                    documents = self.traditional_retrieval.reranker.rerank(
+                        query=query,
+                        documents=documents,
+                        top_k=top_k
+                    )
                 
             elif analysis.recommended_strategy == SearchStrategy.COMBINED:
                 logger.info("🔄 使用组合检索策略")
-                documents = self._combined_search(query, top_k)
+                documents = self._combined_search_with_reranking(query, top_k)
             
             # 4. 结果后处理
             documents = self._post_process_results(documents, analysis)
@@ -199,10 +344,52 @@ class IntelligentQueryRouter:
             
         except Exception as e:
             logger.error(f"查询路由失败: {e}")
-            # 降级到传统检索
             documents = self.traditional_retrieval.hybrid_search(query, top_k)
             return documents, analysis
     
+    def _combined_search_with_reranking(self, query: str, top_k: int) -> List[Document]:
+        """
+        组合搜索策略（带重排）
+        """
+        traditional_k = max(1, top_k // 2)
+        graph_k = top_k - traditional_k
+        
+        # 执行两种检索
+        traditional_docs = self.traditional_retrieval.hybrid_search(query, traditional_k)
+        graph_docs = self.graph_rag_retrieval.graph_rag_search(query, graph_k)
+        
+        # 合并
+        combined_docs = []
+        seen_contents = set()
+        
+        max_len = max(len(traditional_docs), len(graph_docs))
+        for i in range(max_len):
+            if i < len(graph_docs):
+                doc = graph_docs[i]
+                content_hash = hash(doc.page_content[:100])
+                if content_hash not in seen_contents:
+                    seen_contents.add(content_hash)
+                    combined_docs.append(doc)
+            
+            if i < len(traditional_docs):
+                doc = traditional_docs[i]
+                content_hash = hash(doc.page_content[:100])
+                if content_hash not in seen_contents:
+                    seen_contents.add(content_hash)
+                    combined_docs.append(doc)
+        
+        # 【新增】使用 Cross-Encoder 对合并结果进行最终重排
+        if self.traditional_retrieval.enable_reranking and combined_docs:
+            logger.info("应用 Cross-Encoder 重排 (组合结果)...")
+            combined_docs = self.traditional_retrieval.reranker.rerank(
+                query=query,
+                documents=combined_docs,
+                top_k=top_k
+            )
+        
+        return combined_docs[:top_k]
+
+
     def _combined_search(self, query: str, top_k: int) -> List[Document]:
         """
         组合搜索策略：结合传统检索和图RAG的优势
@@ -302,5 +489,6 @@ class IntelligentQueryRouter:
         """
         
         return explanation
+
 
  

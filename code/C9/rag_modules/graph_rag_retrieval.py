@@ -5,6 +5,7 @@
 
 import json
 import logging
+import re
 from collections import defaultdict, deque
 from typing import List, Dict, Tuple, Any, Optional, Set
 from dataclasses import dataclass
@@ -17,11 +18,11 @@ logger = logging.getLogger(__name__)
 
 class QueryType(Enum):
     """查询类型枚举"""
-    ENTITY_RELATION = "entity_relation"  # 实体关系查询：A和B有什么关系？
-    MULTI_HOP = "multi_hop"  # 多跳查询：A通过什么连接到C？
-    SUBGRAPH = "subgraph"  # 子图查询：A相关的所有信息
-    PATH_FINDING = "path_finding"  # 路径查找：从A到B的最佳路径
-    CLUSTERING = "clustering"  # 聚类查询：和A相似的都有什么？
+    ENTITY_RELATION = "entity_relation"     # 实体关系查询：A和B有什么关系？
+    MULTI_HOP = "multi_hop"                 # 多跳查询：A通过什么连接到C？
+    SUBGRAPH = "subgraph"                   # 子图查询：A相关的所有信息
+    PATH_FINDING = "path_finding"           # 路径查找：从A到B的最佳路径
+    CLUSTERING = "clustering"               # 聚类查询：和A相似的都有什么？
 
 @dataclass
 class GraphQuery:
@@ -138,6 +139,7 @@ class GraphRAGRetrieval:
         except Exception as e:
             logger.error(f"构建图索引失败: {e}")
     
+    # 利用LLM理解查询意图转换为GraphQuery对象
     def understand_graph_query(self, query: str) -> GraphQuery:
         """
         理解查询的图结构意图
@@ -229,7 +231,17 @@ class GraphRAGRetrieval:
           }}
         }}
         
-        请严格返回一个合法的 JSON 对象，不要包含任何多余的说明文字。
+        【必须返回纯 JSON，不要任何其他文本】
+
+        返回格式：
+        {{
+            "query_type": "multi_hop|entity_relation|subgraph|path_finding|clustering",
+            "source_entities": ["实体1", "实体2"],
+            "target_entities": [],
+            "relation_types": ["REQUIRES", "BELONGS_TO_CATEGORY"],
+            "max_depth": 2,
+            "constraints": {{}}
+        }}
         """
         
         try:
@@ -240,7 +252,13 @@ class GraphRAGRetrieval:
                 max_tokens=1000
             )
             
-            result = json.loads(response.choices[0].message.content.strip())
+            response_text = response.choices[0].message.content
+            
+            # 【关键改动】使用智能 JSON 提取
+            logger.info(f"LLM 原始响应长度: {len(response_text)} 字符")
+            logger.debug(f"LLM 原始响应: {response_text[:300]}")
+            
+            result = self._extract_json_from_response(response_text)
             
             return GraphQuery(
                 query_type=QueryType(result.get("query_type", "subgraph")),
@@ -259,11 +277,89 @@ class GraphRAGRetrieval:
                 source_entities=[query],
                 max_depth=2
             )
-    
+
+    def _extract_json_from_response(self, text: str) -> Optional[Dict]:
+        """
+        【新增】从 LLM 响应中智能提取 JSON
+        
+        支持以下格式：
+        1. 纯 JSON
+        2. ```json...``` 代码块
+        3. ```...``` 代码块
+        4. 混合文本中的 JSON
+        """
+        if not text or not isinstance(text, str):
+            logger.warning(f"提取JSON: 无效输入 (类型: {type(text)})")
+            return None
+        
+        text = text.strip()
+        
+        # 方案1：直接解析（最快）
+        try:
+            logger.debug("尝试方案1: 直接JSON解析")
+            return json.loads(text)
+        except json.JSONDecodeError as e:
+            logger.debug(f"方案1失败: {e}")
+        
+        # 方案2：从 Markdown 代码块提取
+        logger.debug("尝试方案2: Markdown 代码块提取")
+        patterns = [
+            r'```json\s*([\s\S]*?)```',  # ```json ... ```
+            r'```\s*([\s\S]*?)```',       # ``` ... ```
+        ]
+        
+        for pattern in patterns:
+            matches = re.findall(pattern, text)
+            for match in matches:
+                try:
+                    logger.debug(f"从代码块提取: {match[:100]}")
+                    return json.loads(match.strip())
+                except json.JSONDecodeError as e:
+                    logger.debug(f"代码块解析失败: {e}")
+                    continue
+        
+        # 方案3：查找第一个 { 和最后一个 }
+        logger.debug("尝试方案3: 字符串定位提取")
+        try:
+            start_idx = text.find('{')
+            end_idx = text.rfind('}')
+            
+            if start_idx != -1 and end_idx != -1 and start_idx < end_idx:
+                json_str = text[start_idx:end_idx+1]
+                logger.debug(f"从位置 [{start_idx}:{end_idx+1}] 提取 JSON")
+                logger.debug(f"提取内容: {json_str[:100]}")
+                return json.loads(json_str)
+        except json.JSONDecodeError as e:
+            logger.debug(f"方案3失败: {e}")
+        
+        # 方案4：尝试修复常见 JSON 错误
+        logger.debug("尝试方案4: JSON 修复")
+        try:
+            # 移除尾部逗号
+            cleaned = re.sub(r',\s*}', '}', text)
+            cleaned = re.sub(r',\s*]', ']', cleaned)
+            
+            # 提取 JSON 部分
+            start_idx = cleaned.find('{')
+            end_idx = cleaned.rfind('}')
+            if start_idx != -1 and end_idx != -1:
+                json_str = cleaned[start_idx:end_idx+1]
+                logger.debug(f"修复后提取: {json_str[:100]}")
+                return json.loads(json_str)
+        except json.JSONDecodeError as e:
+            logger.debug(f"方案4失败: {e}")
+        
+        # 所有方案都失败
+        logger.error(f"❌ 所有 JSON 提取方案均失败")
+        logger.error(f"原始文本长度: {len(text)}")
+        logger.error(f"原始文本前500字: {text[:500]}")
+        
+        return None
+
+    # 多跳图遍历
     def multi_hop_traversal(self, graph_query: GraphQuery) -> List[GraphPath]:
         """
-        多跳图遍历：这是图RAG的核心优势
-        通过图结构发现隐含的知识关联
+        多跳图遍历：通过图结构发现隐含的知识关联
         """
         logger.info(f"执行多跳遍历: {graph_query.source_entities} -> {graph_query.target_entities}")
         
@@ -291,13 +387,15 @@ class GraphRAGRetrieval:
                         (target.category IS NOT NULL AND (toString(target.category) CONTAINS kw OR kw CONTAINS toString(target.category)))
                     )"""
                     
+                    # 主查询语句
                     cypher_query = f"""
                     // 多跳推理查询
                     UNWIND $source_entities as source_name
                     MATCH (source)
                     WHERE source.name CONTAINS source_name OR source.nodeId = source_name
                     
-                    // 执行多跳遍历
+                    // 执行多跳遍历（从source出发，在max_depth步内遇到节点target，便记录该路径）
+                    // WHERE后面是利用目标节点过滤掉前面多跳遍历后的多条路径
                     MATCH path = (source)-[*1..{max_depth}]-(target)
                     WHERE NOT source = target{target_filter_clause}
                     
@@ -307,7 +405,7 @@ class GraphRAGRetrieval:
                          relationships(path) as rels,
                          nodes(path) as path_nodes
                     
-                    // 路径评分：短路径 + 高度数节点 + 关系类型匹配
+                    // 对多条路径进行评分：路径长度 + 节点重要性（高度数节点） + 关系类型匹配
                     WITH path, source, target, path_len, rels, path_nodes,
                          (1.0 / path_len) + 
                          (REDUCE(s = 0.0, n IN path_nodes | s + COUNT {{ (n)--() }}) / 10.0 / size(path_nodes)) +
@@ -333,12 +431,12 @@ class GraphRAGRetrieval:
                         if path_data:
                             paths.append(path_data)
                 
+                # 实体间关系查询（A和B有什么关系？）
                 elif graph_query.query_type == QueryType.ENTITY_RELATION:
-                    # 实体间关系查询
                     paths.extend(self._find_entity_relations(graph_query, session))
-                
+
+                # 最短路径查找（A到B的最佳路径）
                 elif graph_query.query_type == QueryType.PATH_FINDING:
-                    # 最短路径查找
                     paths.extend(self._find_shortest_paths(graph_query, session))
                     
         except Exception as e:
@@ -347,6 +445,7 @@ class GraphRAGRetrieval:
         logger.info(f"多跳遍历完成，找到 {len(paths)} 条路径")
         return paths
     
+    # 知识子图提取
     def extract_knowledge_subgraph(self, graph_query: GraphQuery) -> KnowledgeSubgraph:
         """
         提取知识子图：获取实体相关的完整知识网络
@@ -368,7 +467,7 @@ class GraphRAGRetrieval:
                 WHERE source.name CONTAINS entity_name 
                    OR source.nodeId = entity_name
                 
-                // 获取指定深度的邻居
+                // 获取指定深度的邻居（从source出发找max_depth跳内的所有邻居）
                 MATCH (source)-[r*1..{graph_query.max_depth}]-(neighbor)
                 WITH source, collect(DISTINCT neighbor) as neighbors, 
                      collect(DISTINCT r) as relationships
@@ -405,6 +504,7 @@ class GraphRAGRetrieval:
         # 降级方案：简单邻居查询
         return self._fallback_subgraph_extraction(graph_query)
     
+    # 图结构推理（未实现）
     def graph_structure_reasoning(self, subgraph: KnowledgeSubgraph, query: str) -> List[str]:
         """
         基于图结构的推理：这是图RAG的智能之处
@@ -413,16 +513,16 @@ class GraphRAGRetrieval:
         reasoning_chains = []
         
         try:
-            # 1. 识别推理模式
+            # 1. 识别推理模式（未实现）
             reasoning_patterns = self._identify_reasoning_patterns(subgraph)
             
-            # 2. 构建推理链
+            # 2. 构建推理链（未实现）
             for pattern in reasoning_patterns:
                 chain = self._build_reasoning_chain(pattern, subgraph)
                 if chain:
                     reasoning_chains.append(chain)
             
-            # 3. 验证推理链的可信度
+            # 3. 验证推理链的可信度（未实现）
             validated_chains = self._validate_reasoning_chains(reasoning_chains, query)
             
             logger.info(f"图结构推理完成，生成 {len(validated_chains)} 条推理链")
@@ -489,30 +589,31 @@ class GraphRAGRetrieval:
             logger.warning("Neo4j连接未建立，返回空结果")
             return []
         
-        # 1. 查询意图理解
+        # 1. LLM查询意图理解（GraphQuery对象）
         graph_query = self.understand_graph_query(query)
         logger.info(f"查询类型: {graph_query.query_type.value}")
         
         results = []
         
+        # 2. 根据查询类型执行不同策略   
         try:
-            # 2. 根据查询类型执行不同策略
+            # 多跳遍历 / 路径查找 适用于关系类的问题
             if graph_query.query_type in [QueryType.MULTI_HOP, QueryType.PATH_FINDING]:
-                # 多跳遍历 / 路径查找
                 paths = self.multi_hop_traversal(graph_query)
                 results.extend(self._paths_to_documents(paths, query))
                 
+            # 子图提取 / 聚类查询 适用于知识网络类的问题（川菜的特色是什么？XXX类似的菜有什麽）
             elif graph_query.query_type in [QueryType.SUBGRAPH, QueryType.CLUSTERING]:
-                # 子图提取 / 聚类查询：都视为“围绕核心实体的局部知识网络”
+                # 提取子图
                 subgraph = self.extract_knowledge_subgraph(graph_query)
                 
-                # 图结构推理
+                # 图结构推理（未实现）
                 reasoning_chains = self.graph_structure_reasoning(subgraph, query)
                 
                 results.extend(self._subgraph_to_documents(subgraph, reasoning_chains, query))
                 
+            # 实体关系查询（可以视为一跳 / 少量跳的路径查询）
             elif graph_query.query_type == QueryType.ENTITY_RELATION:
-                # 实体关系查询（可以视为一跳 / 少量跳的路径查询）
                 paths = self.multi_hop_traversal(graph_query)
                 results.extend(self._paths_to_documents(paths, query))
             
@@ -559,6 +660,7 @@ class GraphRAGRetrieval:
             logger.error(f"路径解析失败: {e}")
             return None
     
+    # 根据Cypher查询的邻居记录返回子图对象
     def _build_knowledge_subgraph(self, record) -> KnowledgeSubgraph:
         """构建知识子图对象"""
         try:
@@ -684,6 +786,7 @@ class GraphRAGRetrieval:
         """查找最短路径"""
         return []
     
+    # 降级子图提取（未实现）
     def _fallback_subgraph_extraction(self, graph_query: GraphQuery) -> KnowledgeSubgraph:
         """降级子图提取"""
         return KnowledgeSubgraph(
