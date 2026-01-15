@@ -146,7 +146,8 @@ class GraphRAGRetrieval:
         这是图RAG的核心：从自然语言到图查询的转换
         """
         prompt = f"""
-        作为图数据库专家，分析以下查询的图结构意图，并将自然语言问题映射到**已有图结构**上。
+        作为图数据库专家，分析查询并映射到图节点。
+        查询:{query}
         
         已知图中大致有以下节点和关系：
         - 节点类型：
@@ -160,10 +161,11 @@ class GraphRAGRetrieval:
           - (Recipe)-[:CONTAINS_STEP]->(CookingStep)
         
         请根据上述图结构分析下面的查询：
+        1. **联想推理**：如果用户说“冷”，联想“羊肉”、“火锅”、“汤”；如果说“减肥”，联想“鸡胸肉”、“沙拉”。
+        2. **提取实体**：将联想到的具体食材或菜名放入 source_entities 或target_entities。
+        3. **识别意图**：确定查询类型。
         
-        查询：{query}
-        
-        请识别：
+        具体识别类型：
         1. 查询类型：
            - entity_relation: 询问实体间的直接关系（如：鸡肉和胡萝卜能一起做菜吗？）
            - multi_hop: 需要多跳推理（如：鸡肉配什么蔬菜？需要：鸡肉→菜品→食材→蔬菜）
@@ -229,6 +231,18 @@ class GraphRAGRetrieval:
             "health": ["糖尿病", "低糖"],
             "time": {{"max_minutes": 30}}
           }}
+        }}
+
+        示例3：
+        查询："今天有点冷，晚上能吃什么"
+        返回：
+        {{
+            "query_type": "subgraph",
+            "source_entities": ["羊肉", "排骨", "汤", "火锅", "炖菜"], 
+            "target_entities": [],
+            "relation_types": ["REQUIRES", "BELONGS_TO_CATEGORY"],
+            "max_depth": 2,
+            "constraints": {{}}
         }}
         
         【必须返回纯 JSON，不要任何其他文本】
@@ -461,32 +475,37 @@ class GraphRAGRetrieval:
             with self.driver.session() as session:
                 # 简化的子图提取（不依赖APOC）
                 cypher_query = f"""
-                // 找到源实体
                 UNWIND $source_entities as entity_name
+                // 1. 精准搜索策略 (标签限制 + 忽略大小写)
                 MATCH (source)
-                WHERE source.name CONTAINS entity_name 
-                   OR source.nodeId = entity_name
-                
-                // 获取指定深度的邻居（从source出发找max_depth跳内的所有邻居）
-                MATCH (source)-[r*1..{graph_query.max_depth}]-(neighbor)
-                WITH source, collect(DISTINCT neighbor) as neighbors, 
-                     collect(DISTINCT r) as relationships
-                WHERE size(neighbors) <= $max_nodes
-                
-                // 计算图指标
-                WITH source, neighbors, relationships,
-                     size(neighbors) as node_count,
-                     size(relationships) as rel_count
-                
+                WHERE (source:Recipe OR source:Ingredient OR source:Category)
+                AND (toLower(source.name) CONTAINS toLower(entity_name) 
+                    OR toLower(source.category) CONTAINS toLower(entity_name))
+
+                // 2. 找邻居
+                MATCH (source)-[r*1..2]-(neighbor) // 这里建议写死深度或者传参，别太深
+
+                // 3. 聚合
+                WITH source, collect(DISTINCT neighbor) as all_neighbors, collect(DISTINCT last(r)) as all_rels
+
+                // 4. 取前 N 个邻居，而不是丢弃超过 N 个的节点
+                WITH source, 
+                    all_neighbors[0..$max_nodes] as neighbors, 
+                    all_rels[0..$max_nodes] as relationships,
+                    size(all_neighbors) as real_node_count  // 记录真实的邻居总数
+
+                // 5. 计算指标 (基于截断后的子图，或者基于真实总数，看需求)
                 RETURN 
                     source,
-                    neighbors[0..{graph_query.max_nodes}] as nodes,
-                    relationships[0..{graph_query.max_nodes}] as rels,
+                    neighbors,
+                    relationships,
                     {{
-                        node_count: node_count,
-                        relationship_count: rel_count,
-                        density: CASE WHEN node_count > 1 THEN toFloat(rel_count) / (node_count * (node_count - 1) / 2) ELSE 0.0 END
-                    }} as metrics
+                        total_connections: real_node_count, // 告诉 AI 实际上还有更多
+                        shown_connections: size(neighbors),
+                        density: CASE WHEN size(neighbors) > 1 
+                                THEN toFloat(size(relationships)) / (size(neighbors) * (size(neighbors) - 1) / 2) 
+                                ELSE 0.0 END
+                    }}as metrics
                 """
                 
                 result = session.run(cypher_query, {

@@ -263,8 +263,11 @@ class HybridRetrievalModule:
             
         # 3. 按相关性排序并返回
         results.sort(key=lambda x: x.relevance_score, reverse=True)
-        
+
         logger.info(f"实体级检索完成，返回 {len(results)} 个结果")
+
+        self._debug_print_results("实体级检索 (Entity Level)", results[:top_k])
+
         return results[:top_k]
     
     def _neo4j_entity_level_search(self, keywords: List[str], limit: int) -> List[RetrievalResult]:
@@ -399,6 +402,7 @@ class HybridRetrievalModule:
         results.sort(key=lambda x: x.relevance_score, reverse=True)
         
         logger.info(f"主题级检索完成，返回 {len(results)} 个结果")
+        self._debug_print_results("主题级检索 (Topic Level)", results[:top_k])
         return results[:top_k]
     
     def _neo4j_topic_level_search(self, keywords: List[str], limit: int) -> List[RetrievalResult]:
@@ -631,6 +635,9 @@ class HybridRetrievalModule:
                     similarity_score = max(0.0, 1.0 - vector_score) if vector_score <= 1.0 else 0.0
                     doc.metadata["final_score"] = similarity_score
                     merged_docs.append(doc)
+
+        # 打印一下原始的混合结果
+        self._debug_print_results("混合检索-轮询合并后 (Before Rerank)", merged_docs)
         
         # 【改进】4. 使用融合重排替代单一重排
         if use_fusion_reranking and self.enable_fusion_reranking and merged_docs:
@@ -650,6 +657,7 @@ class HybridRetrievalModule:
             logger.info("应用 Cross-Encoder 重排...")
             try:
                 merged_docs = self.reranker.rerank(query, merged_docs, top_k)
+                self._debug_print_results("Cross-Encoder 重排后", merged_docs)
             except Exception as e:
                 logger.error(f"Cross-Encoder 重排失败: {e}")
                 merged_docs = merged_docs[:top_k]
@@ -659,28 +667,28 @@ class HybridRetrievalModule:
         logger.info(f"混合检索完成，返回 {len(merged_docs)} 个文档")
         return merged_docs
 
-        # 4. Cross-Encoder 重排
-        # if self.enable_reranking and merged_docs:
-        #     logger.info("应用 Cross-Encoder 重排...")
-        #     merged_docs = self.reranker.rerank(
-        #         query=query,
-        #         documents=merged_docs,
-        #         top_k=top_k
-        #     )
-        # else:
-        #     # 如果禁用了重排，直接取前 top_k
-        #     merged_docs = merged_docs[:top_k]
-
-        # logger.info(f"混合检索完成，返回 {len(merged_docs)} 个文档")
-        # return merged_docs
         
-        # # 取前top_k个结果
-        # final_docs = merged_docs[:top_k]
-        
-        # logger.info(f"Round-robin合并：从总共{origin_len}个结果合并为{len(final_docs)}个文档")
-        # logger.info(f"混合检索完成，返回 {len(final_docs)} 个文档")
-        # return final_docs
-        
+    def _debug_print_results(self, stage_name, results):
+        """
+        调试辅助函数：打印检索结果详情
+        """
+        print(f"\n🔍 --- [调试] {stage_name} 结果 (Top {len(results)}) ---")
+        for i, item in enumerate(results):
+            # 兼容 RetrievalResult 对象和 Document 对象
+            if hasattr(item, 'metadata'):
+                meta = item.metadata
+                content = getattr(item, 'page_content', '')[:30]
+            else:
+                # 针对 RetrievalResult
+                meta = item.metadata
+                content = getattr(item, 'content', '')[:30]
+                
+            name = meta.get('recipe_name') or meta.get('name') or meta.get('entity_name') or "未知"
+            score = getattr(item, 'relevance_score', meta.get('score', 0))
+            
+            print(f"  {i+1}. [{name}] (分: {score:.4f}) | 来源: {meta.get('source', 'graph/index')}")
+        print(f"--------------------------------------------------\n")
+  
     def close(self):
         """关闭资源连接"""
         if self.driver:

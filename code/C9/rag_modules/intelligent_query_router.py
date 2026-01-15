@@ -354,9 +354,19 @@ class IntelligentQueryRouter:
         traditional_k = max(1, top_k // 2)
         graph_k = top_k - traditional_k
         
-        # 执行两种检索
+        # 传统的混合检索
         traditional_docs = self.traditional_retrieval.hybrid_search(query, traditional_k)
-        graph_docs = self.graph_rag_retrieval.graph_rag_search(query, graph_k)
+        # 图检索【优化】从传统检索结果中“借用”关键词来增强图检索
+        # 如果传统检索找到了相关的“实体级”关键词，我们可以把它们拼接到 query 中
+        expanded_query = query
+        if traditional_docs:
+            # 提取前几个结果拼接到扩展查询中
+            hints = [doc.metadata.get('recipe_name', '') for doc in traditional_docs[:2]]
+            hints = [h for h in hints if h]
+            if hints: 
+                expanded_query = f"{query} (可能相关的菜：{', '.join(hints)})"
+        logger.info(f"Graph RAG 使用增强查询：{expanded_query}")
+        graph_docs = self.graph_rag_retrieval.graph_rag_search(expanded_query, graph_k)
         
         # 合并
         combined_docs = []
