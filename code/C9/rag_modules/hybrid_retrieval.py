@@ -53,39 +53,39 @@ class HybridRetrievalModule:
         self.graph_indexed = False
 
         self.reranker = None
-        self.enable_reranking = getattr(config, "enable_cross_encoder", True)
 
-        if self.enable_reranking:
-            try:
-                self.reranker = CrossEncoderReranker(
-                    model_name=getattr(config, 'cross_encoder_model', 
-                                     self.config.cross_encoder_model),
-                )
-                logger.info("✅ Cross-Encoder 重排器已初始化")
-            except Exception as e:
-                logger.warning(f"Cross-Encoder 初始化失败，将禁用重排: {e}")
-                self.enable_reranking = False
+        # # 【CrossEncoder重排器】
+        # self.enable_reranking = getattr(config, "enable_cross_encoder", True)
+        # if self.enable_reranking:
+        #     try:
+        #         self.reranker = CrossEncoderReranker(
+        #             model_name=getattr(config, 'cross_encoder_model', 
+        #                              self.config.cross_encoder_model),
+        #         )
+        #         logger.info("✅ Cross-Encoder 重排器已初始化")
+        #     except Exception as e:
+        #         logger.warning(f"Cross-Encoder 初始化失败，将禁用重排: {e}")
+        #         self.enable_reranking = False
         
-        # 【新增】初始化融合重排器
-        self.enable_fusion_reranking = getattr(config, 'enable_fusion_reranking', True)
-        
-        if self.enable_fusion_reranking:
-            try:
-                fusion_config = FusionRerankerConfig(
-                    semantic_weight=getattr(config, 'fusion_semantic_weight', 0.6),
-                    graph_weight=getattr(config, 'fusion_graph_weight', 0.4),
-                    enable_adaptive_weight=getattr(config, 'enable_adaptive_weight', True),
-                    enable_mmr=getattr(config, 'enable_mmr', False),
-                    mmr_lambda=getattr(config, 'mmr_lambda', 0.7),
-                    normalize_scores=True
-                )
-                self.fusion_reranker = FusionReranker(fusion_config)
-                logger.info("✅ 融合重排器已初始化")
-            except Exception as e:
-                logger.warning(f"融合重排器初始化失败: {e}")
-                self.enable_fusion_reranking = False
-        else:
-            self.fusion_reranker = None
+        # 【融合重排器】
+        # self.enable_fusion_reranking = getattr(config, 'enable_fusion_reranking', True)
+        # if self.enable_fusion_reranking:
+        #     try:
+        #         fusion_config = FusionRerankerConfig(
+        #             semantic_weight=getattr(config, 'fusion_semantic_weight', 0.6),
+        #             graph_weight=getattr(config, 'fusion_graph_weight', 0.4),
+        #             enable_adaptive_weight=getattr(config, 'enable_adaptive_weight', True),
+        #             enable_mmr=getattr(config, 'enable_mmr', False),
+        #             mmr_lambda=getattr(config, 'mmr_lambda', 0.7),
+        #             normalize_scores=True
+        #         )
+        #         self.fusion_reranker = FusionReranker(fusion_config)
+        #         logger.info("✅ 融合重排器已初始化")
+        #     except Exception as e:
+        #         logger.warning(f"融合重排器初始化失败: {e}")
+        #         self.enable_fusion_reranking = False
+        # else:
+        #     self.fusion_reranker = None
 
     def initialize(self, chunks: List[Document]):
         """初始化检索系统"""
@@ -252,7 +252,8 @@ class HybridRetrievalModule:
                         "entity_name": entity.entity_name,
                         "entity_type": entity.entity_type,
                         "index_keys": entity.index_keys,
-                        "matched_keyword": keyword
+                        "matched_keyword": keyword,
+                        "source": "entity_match"
                     }
                 ))
         
@@ -383,7 +384,7 @@ class HybridRetrievalModule:
                         content='\n'.join(content_parts),
                         node_id=entity.metadata["node_id"],
                         node_type=entity.entity_type,
-                        relevance_score=0.85,  # 分类匹配得分
+                        relevance_score=0.80,  # 分类匹配得分
                         retrieval_level="topic",
                         metadata={
                             "entity_name": entity.entity_name,
@@ -560,7 +561,8 @@ class HybridRetrievalModule:
                         **metadata,
                         "recipe_name": recipe_name,  # 确保有recipe_name字段
                         "score": vector_score,
-                        "search_type": "vector_enhanced"
+                        "search_type": "vector_enhanced",
+                        "source": "vector_search_match"
                     }
                 )
                 enhanced_docs.append(doc)
@@ -571,7 +573,7 @@ class HybridRetrievalModule:
             logger.error(f"增强向量检索失败: {e}")
             return []
     
-    def _get_node_neighbors(self, node_id: str, max_neighbors: int = 3) -> List[str]:
+    def _get_node_neighbors(self, node_id: str, max_neighbors: int = 2) -> List[str]:
         """获取节点的邻居信息"""
         try:
             with self.driver.session() as session:
@@ -586,9 +588,7 @@ class HybridRetrievalModule:
             logger.error(f"获取邻居节点失败: {e}")
             return []
     
-    def hybrid_search(self, query: str, top_k: int = 5,
-        use_fusion_reranking: bool = True,
-        query_complexity: float = 0.5) -> List[Document]:
+    def hybrid_search(self, query: str, top_k: int = 5,) -> List[Document]:
         """
         混合检索：使用Round-robin轮询合并策略
         公平轮询合并不同检索结果，不使用权重配置
@@ -597,19 +597,35 @@ class HybridRetrievalModule:
         
         # 1. 双层检索（实体+主题检索）
         dual_docs = self.dual_level_retrieval(query, top_k*2)
+
+        # =========== 【打印双层检索结果】 ===========
+        print(f"\n🔍 [调试] 双层检索返回了 {len(dual_docs)} 个文档:")
+        for i, doc in enumerate(dual_docs):
+            name = doc.metadata.get("recipe_name", "未知菜名")
+            score = doc.metadata.get("relevance_score", -1)
+            print(f"  {i+1}. {name} (分: {score:.4f})")
+        print(f"--------------------------------------------------\n")
         
         # 2. 增强向量检索
         vector_docs = self.vector_search_enhanced(query, top_k*2)
+
+        # =========== 【打印向量检索结果】 ===========
+        print(f"\n🔍 [调试] 向量检索返回了 {len(vector_docs)} 个文档:")
+        for i, doc in enumerate(vector_docs):
+            name = doc.metadata.get("recipe_name", "未知菜名")
+            # 注意：向量检索返回的是 'score' (通常是距离或相似度)
+            score = doc.metadata.get("score", 0.0)
+            print(f"  {i+1}. {name} (分: {score:.4f})")
+        print(f"--------------------------------------------------\n")
         
         # 3. Round-robin轮询合并
         merged_docs = []
         seen_doc_ids = set()
-        max_len = max(len(dual_docs), len(vector_docs))     # 轮询次数：两种索引中较长的结果数
-        origin_len = len(dual_docs) + len(vector_docs)
+        max_len = max(len(dual_docs), len(vector_docs)) 
         
         # 交替从两个列表中提取结果到终极列表merged_docs
         for i in range(max_len):
-            # 先添加双层检索结果
+            # 添加双层检索结果
             if i < len(dual_docs):
                 doc = dual_docs[i]
                 doc_id = doc.metadata.get("node_id", hash(doc.page_content))
@@ -618,10 +634,10 @@ class HybridRetrievalModule:
                     doc.metadata["search_method"] = "dual_level"
                     doc.metadata["round_robin_order"] = len(merged_docs)
                     # 设置统一的final_score字段
-                    doc.metadata["final_score"] = doc.metadata.get("relevance_score", 0.0)
+                    doc.metadata["final_score"] = doc.metadata.get("relevance_score", 0.85)
                     merged_docs.append(doc)
             
-            # 再添加向量检索结果
+            # 添加向量检索结果
             if i < len(vector_docs):
                 doc = vector_docs[i]
                 doc_id = doc.metadata.get("node_id", hash(doc.page_content))
@@ -629,40 +645,49 @@ class HybridRetrievalModule:
                     seen_doc_ids.add(doc_id)
                     doc.metadata["search_method"] = "vector_enhanced"
                     doc.metadata["round_robin_order"] = len(merged_docs)
-                    # 设置统一的final_score字段（向量得分需要转换）
                     vector_score = doc.metadata.get("score", 0.0)
-                    # COSINE距离转换为相似度：distance越小，相似度越高
-                    similarity_score = max(0.0, 1.0 - vector_score) if vector_score <= 1.0 else 0.0
-                    doc.metadata["final_score"] = similarity_score
-                    merged_docs.append(doc)
+                    
+                    # # COSINE距离转换为相似度：distance越小，相似度越高
+                    # similarity_score = max(0.0, 1.0 - vector_score) if vector_score <= 1.0 else 0.0
+                    # doc.metadata["final_score"] = similarity_score
+                    # merged_docs.append(doc)
+                    doc.metadata["final_score"] = vector_score 
+                    
+                    # 【新增】阈值过滤：如果分数太低（例如小于0.4），直接丢弃，不加入合并列表
+                    if vector_score > 0.45: 
+                        merged_docs.append(doc)
+                    else:
+                        logger.debug(f"丢弃低分向量结果: {doc.metadata.get('recipe_name')} (分: {vector_score})")
 
         # 打印一下原始的混合结果
         self._debug_print_results("混合检索-轮询合并后 (Before Rerank)", merged_docs)
         
-        # 【改进】4. 使用融合重排替代单一重排
-        if use_fusion_reranking and self.enable_fusion_reranking and merged_docs:
-            logger.info("应用多维度融合重排...")
-            try:
-                merged_docs = self.fusion_reranker.fuse_and_rerank(
-                    query=query,
-                    documents=merged_docs,
-                    top_k=top_k,
-                    query_complexity=query_complexity
-                )
-            except Exception as e:
-                logger.error(f"融合重排失败，降级到原始排序: {e}")
-                merged_docs = merged_docs[:top_k]
-        elif self.enable_reranking and merged_docs:
-            # 降级：只使用 Cross-Encoder（如果融合重排禁用）
-            logger.info("应用 Cross-Encoder 重排...")
-            try:
-                merged_docs = self.reranker.rerank(query, merged_docs, top_k)
-                self._debug_print_results("Cross-Encoder 重排后", merged_docs)
-            except Exception as e:
-                logger.error(f"Cross-Encoder 重排失败: {e}")
-                merged_docs = merged_docs[:top_k]
-        else:
-            merged_docs = merged_docs[:top_k]
+        # 【reranking操作】
+        # 【融合重排】
+        # if use_fusion_reranking and self.enable_fusion_reranking and merged_docs:
+        #     logger.info("应用多维度融合重排...")
+        #     try:
+        #         merged_docs = self.fusion_reranker.fuse_and_rerank(
+        #             query=query,
+        #             documents=merged_docs,
+        #             top_k=top_k,
+        #             query_complexity=query_complexity
+        #         )
+        #     except Exception as e:
+        #         logger.error(f"融合重排失败，降级到原始排序: {e}")
+        #         merged_docs = merged_docs[:top_k]
+        # #【Cross-Encoder 重排】
+        # elif self.enable_reranking and merged_docs:
+        #     logger.info("应用 Cross-Encoder 重排...")
+        #     try:
+        #         merged_docs = self.reranker.rerank(query, merged_docs, top_k)
+        #         self._debug_print_results("Cross-Encoder 重排后", merged_docs)
+        #     except Exception as e:
+        #         logger.error(f"Cross-Encoder 重排失败: {e}")
+        #         merged_docs = merged_docs[:top_k]
+        # else:
+        #     logger.info("不进行重排操作")
+        #     merged_docs = merged_docs[:top_k]
         
         logger.info(f"混合检索完成，返回 {len(merged_docs)} 个文档")
         return merged_docs
@@ -684,9 +709,9 @@ class HybridRetrievalModule:
                 content = getattr(item, 'content', '')[:30]
                 
             name = meta.get('recipe_name') or meta.get('name') or meta.get('entity_name') or "未知"
-            score = getattr(item, 'relevance_score', meta.get('score', 0))
+            score = getattr(item, 'relevance_score', meta.get('final_score'))
             
-            print(f"  {i+1}. [{name}] (分: {score:.4f}) | 来源: {meta.get('source', 'graph/index')}")
+            print(f"  {i+1}. [{name}] (分: {score:.4f}) | 来源: {meta.get('source')}")
         print(f"--------------------------------------------------\n")
   
     def close(self):

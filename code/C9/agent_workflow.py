@@ -183,6 +183,11 @@ workflow.add_node("sms", sms_node)
 
 # 设置入口点
 workflow.set_entry_point("chef")
+
+
+workflow.add_edge("chef", END)
+
+
 workflow.add_edge("chef", "nutritionist")
 
 # 条件边：营养师审核逻辑
@@ -256,34 +261,34 @@ if __name__ == "__main__":
             if node_name == "chef":
                 print(f"\n🥘 主厨生成的食谱:\n{node_output.get('recipe_content')}")
             
-            if node_name == "nutritionist":
-                is_approved = node_output.get('is_approved')
-                feedback = node_output.get('critique_feedback')
-                status = "✅ 通过" if is_approved else f"❌ 驳回 (意见: {feedback})"
-                print(f"\n📋 营养师审核结果: {status}")
+    #         if node_name == "nutritionist":
+    #             is_approved = node_output.get('is_approved')
+    #             feedback = node_output.get('critique_feedback')
+    #             status = "✅ 通过" if is_approved else f"❌ 驳回 (意见: {feedback})"
+    #             print(f"\n📋 营养师审核结果: {status}")
     
-    # 4. Human-in-the-loop: 人工确认
-    # 获取当前暂停时的状态快照
-    snapshot = app.get_state(thread_config)
+    # # 4. Human-in-the-loop: 人工确认
+    # # 获取当前暂停时的状态快照
+    # snapshot = app.get_state(thread_config)
     
-    if snapshot.values.get("recipe_content"):
-        print("\n" + "="*50)
-        print("📝 【最终确认】营养师审核通过的食谱：")
-        print(snapshot.values["recipe_content"])
-        print("="*50)
+    # if snapshot.values.get("recipe_content"):
+    #     print("\n" + "="*50)
+    #     print("📝 【最终确认】营养师审核通过的食谱：")
+    #     print(snapshot.values["recipe_content"])
+    #     print("="*50)
         
-        confirm = input("\n👤 人工确认: 是否满意该食谱并生成购物清单发送短信? (y/n): ")
+    #     confirm = input("\n👤 人工确认: 是否满意该食谱并生成购物清单发送短信? (y/n): ")
         
-        if confirm.lower() == "y":
-            print("\n✅ 用户确认。继续执行：生成清单 -> 发送短信...")
-            # 继续执行剩余步骤 (Shopper -> SMS)
-            for event in app.stream(None, thread_config):
-                pass
-            print("\n🎉 流程结束！")
-        else:
-            print("\n🛑 用户取消，流程结束。")
-    else:
-        print("\n⚠️ 流程异常结束，未生成食谱。")
+    #     if confirm.lower() == "y":
+    #         print("\n✅ 用户确认。继续执行：生成清单 -> 发送短信...")
+    #         # 继续执行剩余步骤 (Shopper -> SMS)
+    #         for event in app.stream(None, thread_config):
+    #             pass
+    #         print("\n🎉 流程结束！")
+    #     else:
+    #         print("\n🛑 用户取消，流程结束。")
+    # else:
+    #     print("\n⚠️ 流程异常结束，未生成食谱。")
 
     # 退出时清理资源
     rag_system._cleanup()

@@ -10,6 +10,7 @@ import logging
 from typing import List, Dict, Tuple, Any, Optional
 from dataclasses import dataclass
 from enum import Enum
+from .reranking_fusion import FusionReranker, FusionRerankerConfig
 
 from langchain_core.documents import Document
 
@@ -60,6 +61,24 @@ class IntelligentQueryRouter:
             "combined_count": 0,
             "total_queries": 0
         }
+        self.enable_fusion_reranking = getattr(config, 'enable_fusion_reranking', True)
+        if self.enable_fusion_reranking:
+            try:
+                fusion_config = FusionRerankerConfig(
+                    semantic_weight=getattr(config, 'fusion_semantic_weight', 0.6),
+                    graph_weight=getattr(config, 'fusion_graph_weight', 0.4),
+                    enable_adaptive_weight=getattr(config, 'enable_adaptive_weight', True),
+                    use_mmr=getattr(config, 'enable_mmr', False),
+                    mmr_lambda=getattr(config, 'mmr_lambda', 0.7),
+                    normalize_scores=True
+                )
+                self.fusion_reranker = FusionReranker(fusion_config)
+                logger.info("✅ 融合重排器已初始化")
+            except Exception as e:
+                logger.warning(f"融合重排器初始化失败: {e}")
+                self.enable_fusion_reranking = False
+        else:
+            self.fusion_reranker = None
         
     # 使用LLM分析查询特征
     def analyze_query(self, query: str) -> QueryAnalysis:
@@ -306,48 +325,54 @@ class IntelligentQueryRouter:
         
         # 1. 分析查询特征
         analysis = self.analyze_query(query)
-        
-        # 2. 更新统计
         self._update_route_stats(analysis.recommended_strategy)
         
-        # 3. 根据策略执行检索
-        documents = []
+        raw_documents = []
         
         try:
+            # 获取候选文档
             if analysis.recommended_strategy == SearchStrategy.HYBRID_TRADITIONAL:
                 logger.info("使用传统混合检索")
                 # 混合检索已内置重排逻辑
-                documents = self.traditional_retrieval.hybrid_search(query, top_k)
+                raw_documents = self.traditional_retrieval.hybrid_search(query, top_k)
                 
             elif analysis.recommended_strategy == SearchStrategy.GRAPH_RAG:
                 logger.info("🕸️ 使用图RAG检索")
-                documents = self.graph_rag_retrieval.graph_rag_search(query, top_k * 2)
-                
-                # 【新增】对图RAG结果进行 Cross-Encoder 重排
-                if self.traditional_retrieval.enable_reranking:
-                    logger.info("应用 Cross-Encoder 重排 (图RAG结果)...")
-                    documents = self.traditional_retrieval.reranker.rerank(
-                        query=query,
-                        documents=documents,
-                        top_k=top_k
-                    )
+                raw_documents = self.graph_rag_retrieval.graph_rag_search(query, top_k * 2)
                 
             elif analysis.recommended_strategy == SearchStrategy.COMBINED:
                 logger.info("🔄 使用组合检索策略")
-                documents = self._combined_search_with_reranking(query, top_k)
+                raw_documents = self._combined_search(query, top_k)
             
-            # 4. 结果后处理
-            documents = self._post_process_results(documents, analysis)
+            # 3.候选文档进行重排
+            final_documents = []
+            if self.fusion_reranker and raw_documents:
+                logger.info(f"执行全局重排(Global Reranking)，候选数量：{len(raw_documents)}")
+                try:
+                    final_documents = self.fusion_reranker.fuse_and_rerank(
+                        query,
+                        raw_documents,
+                        top_k=top_k
+                    )
+                except Exception as e:
+                    logger.error(f"全局重排失败: {e}，回退到原始顺序")
+                    final_documents = raw_documents[:top_k]
+            else:
+                # 没有重排器直接截断
+                final_documents = raw_documents[:top_k]
             
-            logger.info(f"路由完成，返回 {len(documents)} 个结果")
-            return documents, analysis
+            # 4. 结果后处理（添加元数据）
+            final_documents = self._post_process_results(final_documents, analysis)
+            
+            logger.info(f"路由完成，返回 {len(final_documents)} 个结果")
+            return final_documents, analysis
             
         except Exception as e:
-            logger.error(f"查询路由失败: {e}")
-            documents = self.traditional_retrieval.hybrid_search(query, top_k)
-            return documents, analysis
+            logger.error(f"查询路由失败: {e}, 使用传统混合检索")
+            raw_documents = self.traditional_retrieval.hybrid_search(query, top_k)
+            return raw_documents, analysis
     
-    def _combined_search_with_reranking(self, query: str, top_k: int) -> List[Document]:
+    def _combined_search_with_advGraphRAG(self, query: str, top_k: int) -> List[Document]:
         """
         组合搜索策略（带重排）
         """
@@ -357,15 +382,27 @@ class IntelligentQueryRouter:
         # 传统的混合检索
         traditional_docs = self.traditional_retrieval.hybrid_search(query, traditional_k)
         # 图检索【优化】从传统检索结果中“借用”关键词来增强图检索
-        # 如果传统检索找到了相关的“实体级”关键词，我们可以把它们拼接到 query 中
+        # 所选的关键词有条件
         expanded_query = query
+        valid_hints = []
         if traditional_docs:
-            # 提取前几个结果拼接到扩展查询中
-            hints = [doc.metadata.get('recipe_name', '') for doc in traditional_docs[:2]]
-            hints = [h for h in hints if h]
-            if hints: 
-                expanded_query = f"{query} (可能相关的菜：{', '.join(hints)})"
-        logger.info(f"Graph RAG 使用增强查询：{expanded_query}")
+            for doc in traditional_docs:
+                # 检查来源
+                source = doc.metadata.get("search_method", "")
+                score = doc.metadata.get("final_score", 0.0)
+                name = doc.metadata.get("recipe_name", "")
+
+                # 条件：必须是图检索结果，或者分数极高的向量结果(>0.7)
+                if (source == "dual_level") or (source == "vector_enhanced" and score > 0.75):
+                    if name and name not in query:
+                        valid_hints.append(name)
+        # 只取前两个最可靠
+        if valid_hints:
+            expanded_query = f"{query} (可能相关的菜: {', '.join(valid_hints[:2])})"
+            logger.info(f"Graph RAG 使用高置信度增强查询: {expanded_query}")
+        else:
+            logger.info("传统检索结果置信度不足，不进行 Query Expansion")
+        # 执行GraphRAG
         graph_docs = self.graph_rag_retrieval.graph_rag_search(expanded_query, graph_k)
         
         # 合并
@@ -388,15 +425,6 @@ class IntelligentQueryRouter:
                     seen_contents.add(content_hash)
                     combined_docs.append(doc)
         
-        # 【新增】使用 Cross-Encoder 对合并结果进行最终重排
-        if self.traditional_retrieval.enable_reranking and combined_docs:
-            logger.info("应用 Cross-Encoder 重排 (组合结果)...")
-            combined_docs = self.traditional_retrieval.reranker.rerank(
-                query=query,
-                documents=combined_docs,
-                top_k=top_k
-            )
-        
         return combined_docs[:top_k]
 
 
@@ -404,13 +432,11 @@ class IntelligentQueryRouter:
         """
         组合搜索策略：结合传统检索和图RAG的优势
         """
-        # 分配结果数量
-        traditional_k = max(1, top_k // 2)
-        graph_k = top_k - traditional_k
+        candidate_k = top_k
         
         # 执行两种检索
-        traditional_docs = self.traditional_retrieval.hybrid_search(query, traditional_k)
-        graph_docs = self.graph_rag_retrieval.graph_rag_search(query, graph_k)
+        traditional_docs = self.traditional_retrieval.hybrid_search(query, candidate_k)
+        graph_docs = self.graph_rag_retrieval.graph_rag_search(query, candidate_k)
         
         # 合并和去重
         combined_docs = []
