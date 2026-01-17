@@ -3,8 +3,8 @@
 # 放行code文件夹（必须写，否则子文件夹被连带忽略）
 !code/
 # 只放行code/C9 文件夹，其他子文件夹都忽略
-!code/C9/
+!code/AgentProj/
 # 放行C9文件夹下的所有文件+子文件夹（递归生效）
-!code/C9/**/*
+!code/AgentProj/**/*
 # 必须放行.gitignore自身，保证规则永久生效
 !.gitignore
